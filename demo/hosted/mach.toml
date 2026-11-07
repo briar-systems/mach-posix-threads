@@ -1,0 +1,70 @@
+# the backend end to end in a loader-hosted process: run.sh builds and runs it
+[project]
+id = "hosted"
+version = "0.0.0"
+mach = "^6"
+src = "src"
+work = "out/{target.name}/{profile.name}"
+
+[profile.debug]
+default = true
+optimize = false
+debug = true
+simd = "scalarize"
+
+[target.linux-x86_64]
+arch = "x86_64"
+sys = "linux"
+env = "gnu"
+abi = "sysv64"
+
+[target.linux-aarch64]
+arch = "aarch64"
+sys = "linux"
+env = "gnu"
+abi = "aapcs64"
+
+[target.linux-riscv64]
+arch = "riscv64"
+sys = "linux"
+env = "gnu"
+abi = "lp64"
+
+# the library whose thread-locals are initial-exec, which the loader lays out
+[link.locals]
+source = "local"
+path = "{project.work}/lib/liblocals.so"
+sys = ["linux"]
+arch = ["*"]
+abi = ["*"]
+export = false
+
+[artifact.locals]
+kind = "shared"
+entry = "locals.mach"
+out = "{project.work}/lib/liblocals.so"
+targets = ["*"]
+link = []
+need = []
+
+[artifact.with_backend]
+kind = "bin"
+entry = "with_backend.mach"
+out = "{project.work}/bin/with_backend"
+targets = ["*"]
+link = ["locals"]
+need = ["artifact.locals"]
+
+[artifact.without_backend]
+kind = "bin"
+entry = "without_backend.mach"
+out = "{project.work}/bin/without_backend"
+targets = ["*"]
+link = ["locals"]
+need = ["artifact.locals"]
+
+[dep.std]
+path = "../../dep/std"
+
+[dep.posix_threads]
+path = "../.."
