@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  MACH_REF: 861a757c8543ca46d96f064e33afce730db5bccb
+  MACH_REF: 4697bac0f6d34c7d074f69eb5c832e705cc7aa48
   PROFILE: ${{ inputs.profile || 'debug' }}
 
 jobs:
