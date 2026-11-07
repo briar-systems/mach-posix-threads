@@ -1,44 +1,39 @@
-# mach-template
+# mach-posix-threads
 
-<!-- template -->
-A bone stock [Mach](https://github.com/briar-systems/mach) 6.3 Hello, World,
-the project `mach init` makes with every host target declared and its entry at
-`src/bin/<id>.mach`, with a GitHub repository set up around it: pull request CI
-on Linux, Windows and macOS, tag-driven releases with prebuilt binaries,
-protected branches, and a label set.
+std's thread backend over `pthread_create`, for loader-hosted linux processes.
 
-## Using this template
+A shared library, a dynamic executable or anything that links a C library on
+linux is loader-hosted. Thread-locals and C runtime state exist there only on
+threads the host creates, so `std.sync.thread.spawn` returns `unsupported` until
+a backend is installed. std names no libc symbol, so the backend is this package.
+This is the only code in the family that names `pthread_create`.
 
-```sh
-gh repo create <owner>/<repo> --template briar-systems/mach-template --public --clone
-cd <repo>
-./setup.sh
+## Use
+
+Depend on the package and import its module once, anywhere the build reaches.
+That puts the backend in the link, and `[link.c]` cascades to the program. The
+program's linux targets state `env = "gnu"`, which names the loader, and the
+build needs a C compiler to locate `libc.so.6`, `CC` for a cross target.
+
+```mach
+use posix_threads.backend;
 ```
 
-`setup.sh` is run-and-delete. It runs once, removes itself in the commit it
-makes, and is never needed again. If it fails partway, fix the cause and run
-it again. It:
+A static executable never consults the backend, and darwin and windows have
+their own system threads, so the module is empty there. `Config.stack_commit` is
+refused as `unsupported`. Exactly one backend belongs in a link. Keep secrets
+away from this seam: it is a `#[weak]` call, and constant-time code is not yet
+refused for passing one through it. Replacement is link time only, so a shared
+library that carries std and spawns has this package in its own link. No other
+image can supply it, and `LD_PRELOAD` does not.
 
-- sets the project id to the repository name, minus any leading `mach-` and
-  with dashes turned into underscores, and renames the entry file to match.
-  Pass an id to choose another: `./setup.sh <id>`
-- removes this section from the README
-- commits and pushes those changes
-- creates the `main` and `dev` branches and makes `dev` the default
-- allows merge commits only
-- replaces GitHub's stock labels with the set below
-- adds rulesets that protect `main`, `dev` and `v*` tags
-
-It needs `git` and `gh`, logged in with admin rights on the repository.
-Update the copyright holder in `LICENSE` yourself.
-<!-- /template -->
+`demo/hosted` runs the backend end to end: `demo/hosted/run.sh path/to/mach`.
 
 ## Build
 
 ```sh
 mach dep pull .
 mach build .
-mach run .
 mach test . --timeout 5m
 ```
 
@@ -68,10 +63,10 @@ Issues are labeled on independent axes:
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pull requests, on Linux. It checks formatting,
-builds every artifact for every target in `mach.toml`, and runs the unit tests of
-the targets the runner can execute. Targets no runner executes, such as riscv, are
-built, never tested. Nothing runs under emulation.
+`.github/workflows/ci.yml` runs on pull requests, on Linux. It checks formatting
+and runs the unit tests of the host target, where a test thread goes through the
+backend. Other targets would link a `libc.so.6` the runner does not hold, so
+they are not built. Nothing runs under emulation.
 
 To test on other hosts before merging, such as a darwin-specific change, dispatch
 it on the branch: `gh workflow run CI --ref <branch> -f runners='["macos-15"]'`.
@@ -84,8 +79,9 @@ demo suites are not CI jobs. Run them locally.
 `gate` is the check the branch rules require. It fails if any job it needs
 failed or was cancelled.
 
-The compiler version is `MACH_VERSION`, an exact release, in `ci.yml` and
-`cd.yml`. Change it together with the `mach` range in `mach.toml`.
+The compiler is `MACH_REF`, a mach commit, in `ci.yml` until a 7.x release
+exists. `cd.yml` still names `MACH_VERSION`, an exact release, and moves to one
+then. Change either together with the `mach` range in `mach.toml`.
 
 ## Releases
 

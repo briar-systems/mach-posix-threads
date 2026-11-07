@@ -1,0 +1,87 @@
+# std's thread backend over the host's pthread_create
+#
+# importing this module puts the three definitions in the link, where they
+# replace std's defaults by name, so std.sync.thread.spawn works in a
+# loader-hosted linux process and its threads carry every module's thread-locals
+# and the C runtime's per-thread state. std selects the path itself: a static
+# linux executable never reaches this, and darwin and windows have their own
+# system threads, so the module is empty there. the shapes are the ones
+# OS-CONTRACT.md in mach-std states, and the compiler does not check them. keep
+# secrets away from this seam.
+
+$if ($mach.build.sys == $mach.sys.linux) {
+    use std.types.size.usize;
+
+    val ENOTSUP: i64 = -95;
+
+    # opaque to mach, and larger than any target's pthread_attr_t
+    rec Attributes {
+        words: [16]usize;
+    }
+
+    #[library("c")]
+    ext fun pthread_attr_init(attr: *Attributes) i32;
+    #[library("c")]
+    ext fun pthread_attr_setstacksize(attr: *Attributes, size: usize) i32;
+    #[library("c")]
+    ext fun pthread_attr_destroy(attr: *Attributes) i32;
+    #[library("c")]
+    ext fun pthread_create(thread: *usize, attr: *Attributes, entry: fun(*u8) *u8, arg: *u8) i32;
+    #[library("c")]
+    ext fun pthread_join(thread: usize, result: ptr) i32;
+    #[library("c")]
+    ext fun pthread_detach(thread: usize) i32;
+
+    # start a pthread that runs entry(arg)
+    # ---
+    # stack_reserve: the stack in bytes
+    # stack_commit:  refused when set, as pthreads cannot state it
+    # handle:        receives the pthread_t
+    # ret:           0, or a negative errno
+    #[symbol("std_thread_backend_spawn")]
+    fun backend_spawn(entry: fun(*u8) *u8, arg: *u8, stack_reserve: usize, stack_commit: usize, handle: *usize) i64 {
+        if (stack_commit != 0) { ret ENOTSUP; }
+        var attr: Attributes;
+        var rc:   i32 = pthread_attr_init(?attr);
+        if (rc != 0) { ret -(rc::i64); }
+        rc = pthread_attr_setstacksize(?attr, stack_reserve);
+        if (rc == 0) { rc = pthread_create(handle, ?attr, entry, arg); }
+        pthread_attr_destroy(?attr);
+        ret -(rc::i64);
+    }
+
+    # wait for a thread to end and release it
+    # ---
+    # ret: 0, or a negative errno
+    #[symbol("std_thread_backend_join")]
+    fun backend_join(handle: usize) i64 {
+        ret -(pthread_join(handle, nil)::i64);
+    }
+
+    # give up a thread's handle, so it releases itself
+    # ---
+    # ret: 0, or a negative errno
+    #[symbol("std_thread_backend_detach")]
+    fun backend_detach(handle: usize) i64 {
+        ret -(pthread_detach(handle)::i64);
+    }
+}
+
+use std.sync.atomic;
+use std.sync.thread;
+
+var ran: i64 = 0;
+
+fun worker(arg: *u8) {
+    atomic.store(?ran, 1);
+}
+
+test backend__a_spawned_thread_runs_and_joins {
+    var t:       thread.Thread;
+    val spawned: thread.Operation = thread.spawn_with(worker, nil, ?t);
+    if (!(sel spawned.ok)) { ret 1; }
+    val joined: thread.Operation = thread.join(?t);
+    if (!(sel joined.ok))       { ret 2; }
+    if (atomic.load(?ran) != 1) { ret 3; }
+    ret 0;
+}
