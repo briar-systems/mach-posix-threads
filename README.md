@@ -62,10 +62,10 @@ Issues are labeled on independent axes:
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pull requests, on Linux. It checks formatting,
-builds every artifact for every target in `mach.toml`, and runs the unit tests of
-the targets the runner can execute. Targets no runner executes, such as riscv, are
-built, never tested. Nothing runs under emulation.
+`.github/workflows/ci.yml` runs on pull requests, on Linux. It checks formatting
+and runs the unit tests of the host target, where a test thread goes through the
+backend. Other targets would link a `libc.so.6` the runner does not hold, so
+they are not built. Nothing runs under emulation.
 
 To test on other hosts before merging, such as a darwin-specific change, dispatch
 it on the branch: `gh workflow run CI --ref <branch> -f runners='["macos-15"]'`.
