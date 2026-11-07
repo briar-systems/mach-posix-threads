@@ -7,16 +7,15 @@ use std.sync.thread;
 #[library("locals")]
 ext fun locals_next() i64;
 
-fun worker(arg: *u8) {
-}
+fun worker(arg: *u8) {}
 
 #[symbol("main")]
 fun main(argc: i64, argv: **u8) i64 {
     if (locals_next() != 42) { ret 1; }
     var t:       thread.Thread;
     val spawned: thread.Operation = thread.spawn_with(worker, nil, ?t);
-    if (sel spawned.ok)                      { ret 2; }
-    if (t.tid != thread.ERROR_UNSUPPORTED)   { ret 3; }
+    if (sel spawned.ok)                    { ret 2; }
+    if (t.tid != thread.ERROR_UNSUPPORTED) { ret 3; }
     print.println("without the backend: spawn returned unsupported");
     ret 0;
 }

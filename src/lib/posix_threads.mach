@@ -1,2 +1,3 @@
 # the library's entry: the module that replaces std's thread backend
 use posix_threads.backend;
+use std.runtime;

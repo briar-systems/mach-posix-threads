@@ -66,3 +66,22 @@ $if ($mach.build.sys == $mach.sys.linux) {
         ret -(pthread_detach(handle)::i64);
     }
 }
+
+use std.sync.atomic;
+use std.sync.thread;
+
+var ran: i64 = 0;
+
+fun worker(arg: *u8) {
+    atomic.store(?ran, 1);
+}
+
+test backend__a_spawned_thread_runs_and_joins {
+    var t:       thread.Thread;
+    val spawned: thread.Operation = thread.spawn_with(worker, nil, ?t);
+    if (!(sel spawned.ok)) { ret 1; }
+    val joined: thread.Operation = thread.join(?t);
+    if (!(sel joined.ok))       { ret 2; }
+    if (atomic.load(?ran) != 1) { ret 3; }
+    ret 0;
+}

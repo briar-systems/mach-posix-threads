@@ -2,12 +2,12 @@
 # thread-local, the executable's and the C runtime's state, which a raw clone
 # thread has none of
 
+use posix_threads.backend;
 use std.print;
 use std.runtime;
 use std.sync.atomic;
 use std.sync.thread;
 use std.types.size.usize;
-use posix_threads.backend;
 
 #[library("locals")]
 ext fun locals_next() i64;
@@ -18,10 +18,10 @@ var own: i64 = 7;
 var passed: i64 = 0;
 
 fun worker(arg: *u8) {
-    if (own != 7)           { ret; }
+    if (own != 7) { ret; }
     own = arg::usize::i64;
-    if (locals_next() != 42) { ret; }
-    if (locals_next() != 43) { ret; }
+    if (locals_next() != 42)    { ret; }
+    if (locals_next() != 43)    { ret; }
     if (own == arg::usize::i64) { atomic.fetch_add(?passed, 1); }
 }
 
