@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  MACH_REF: a53cdd4b54ef77f2e527bd3e563f00449e22bbf8
+  MACH_REF: 861a757c8543ca46d96f064e33afce730db5bccb
   PROFILE: ${{ inputs.profile || 'debug' }}
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # until a 7.x release exists, the compiler is built from the mach commit
-      # pinned in MACH_REF, the first that takes std's #[weak] backend defaults
+      # pinned in MACH_REF
       - name: restore the pinned mach
         id: mach
         uses: actions/cache@v6
