@@ -11,9 +11,10 @@ This is the only code in the family that names `pthread_create`.
 ## Use
 
 Depend on the package and import its module once, anywhere the build reaches.
-That puts the backend in the link, and `[link.c]` cascades to the program. The
-program's linux targets state `env = "gnu"`, which names the loader, and the
-build needs a C compiler to locate `libc.so.6`, `CC` for a cross target.
+That puts the backend in the link, and `[link.c]` cascades to the program. It
+names the shared C library, found by the link on the system's search path, so a
+build needs no C compiler. The program's linux targets state `env = "gnu"`,
+which names the loader.
 
 ```mach
 use posix_threads.backend;
@@ -63,10 +64,9 @@ Issues are labeled on independent axes:
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pull requests, on Linux. It checks formatting
-and runs the unit tests of the host target, where a test thread goes through the
-backend. Other targets would link a `libc.so.6` the runner does not hold, so
-they are not built. Nothing runs under emulation.
+`.github/workflows/ci.yml` runs on pull requests, on Linux. It checks formatting,
+builds every target and runs the unit tests of the host target, where a test
+thread goes through the backend. Nothing runs under emulation.
 
 To test on other hosts before merging, such as a darwin-specific change, dispatch
 it on the branch: `gh workflow run CI --ref <branch> -f runners='["macos-15"]'`.
