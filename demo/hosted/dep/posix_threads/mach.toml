@@ -1,0 +1,97 @@
+[project]
+id = "posix_threads"
+version = "0.1.0"
+mach = "^6"
+src = "src"
+work = "out/{target.name}/{profile.name}"
+
+[profile.debug]
+default = true
+optimize = false
+debug = true
+simd = "scalarize"
+
+[profile.release]
+optimize = true
+debug = false
+simd = "scalarize"
+
+[target.linux-x86_64]
+arch = "x86_64"
+sys = "linux"
+env = "gnu"
+abi = "sysv64"
+
+[target.linux-aarch64]
+arch = "aarch64"
+sys = "linux"
+env = "gnu"
+abi = "aapcs64"
+
+[target.linux-riscv64]
+arch = "riscv64"
+sys = "linux"
+env = "gnu"
+abi = "lp64"
+
+[target.linux-riscv32]
+arch = "riscv32"
+sys = "linux"
+env = "gnu"
+abi = "ilp32d"
+isa = "rv32i2p1_m2p0_a2p1_f2p2_d2p2_c2p0_zicsr2p0_zifencei2p0"
+
+[target.windows-x86_64]
+arch = "x86_64"
+sys = "windows"
+env = "msvc"
+abi = "win64"
+
+[target.windows-aarch64]
+arch = "aarch64"
+sys = "windows"
+env = "msvc"
+abi = "aapcs64win"
+
+[target.darwin-x86_64]
+arch = "x86_64"
+sys = "darwin"
+env = "macos"
+abi = "sysv64"
+
+[target.darwin-aarch64]
+arch = "aarch64"
+sys = "darwin"
+env = "macos"
+abi = "aapcs64"
+
+# exported so a program that imports the backend binds the C runtime through it.
+# a library named by `system` is searched for as its archive first, and glibc's
+# libc.a is not what a loader-hosted program binds, so the shared object is named
+# by file. CC is the C compiler of the build's target
+[link.c]
+source = "local"
+path = "{project.work}/libc.so.6"
+sys = ["linux"]
+arch = ["*"]
+abi = ["*"]
+export = true
+
+[step.libc]
+argv = ["sh", "-c", "cp -L \"$(${CC:-cc} -print-file-name=libc.so.6)\" '{project.work}/libc.so.6'"]
+in = []
+out = ["{project.work}/libc.so.6"]
+
+[artifact.posix_threads]
+kind = "static"
+default = true
+export = true
+entry = "lib/posix_threads.mach"
+out = "{project.work}/lib/posix_threads"
+targets = ["*"]
+link = ["c"]
+need = []
+
+[dep.std]
+git = "https://github.com/briar-systems/mach-std"
+version = "^9.0"

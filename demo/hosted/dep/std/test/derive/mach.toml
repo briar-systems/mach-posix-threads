@@ -1,0 +1,27 @@
+[project]
+id = "drvprobe"
+version = "0.0.0"
+mach = "^6"
+src = "src"
+work = "out/{target.name}/{profile.name}"
+
+[target.linux-x86_64]
+arch = "x86_64"
+sys = "linux"
+abi = "sysv64"
+
+[profile.debug]
+optimize = false
+debug = true
+simd = "scalarize"
+
+[artifact.drvprobe]
+kind = "bin"
+entry = "main.mach"
+out = "{project.work}/bin/drvprobe"
+targets = ["*"]
+link = []
+need = []
+
+[dep.std]
+path = "../.."

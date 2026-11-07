@@ -1,0 +1,12 @@
+# a shared library's thread-local, reached initial-exec at an offset the loader picks
+
+#[thread]
+var counter: i64 = 41;
+
+# ret: the calling thread's counter, one higher each call
+#[export]
+#[symbol("locals_next")]
+pub fun locals_next() i64 {
+    counter = counter + 1;
+    ret counter;
+}

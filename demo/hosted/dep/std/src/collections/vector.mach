@@ -1,0 +1,798 @@
+# resizable dynamic array backed by an allocator
+
+use std.system.capability;
+use std.types.bool.bool;
+use std.types.bool.false;
+use std.types.bool.true;
+use std.types.error.err;
+use std.types.option.opt;
+use std.types.result.res;
+use std.types.size.usize;
+
+use A: std.allocator;
+use std.collections.slice;
+use std.collections.slice.Slice;
+use std.memory;
+
+$if (capability.HOSTED) {
+    use std.allocator.page;
+    use std.allocator.testing;
+}
+
+# a refused vector operation
+# ---
+# alloc:  the allocator refused a growth, which left the vector as it was
+# bounds: an index or length lies past what the vector holds, nothing changed
+pub tag VectorError: u8 {
+    alloc: A.Error;
+    bounds;
+}
+
+# Resizable vector backed by an Allocator
+# ---
+# a:    allocator to use for allocations
+# data: pointer to the backing array
+# len:  number of elements in the vector
+# cap:  allocated capacity of the backing array
+pub rec Vector[T] {
+    a:    *A.Allocator;
+    data: *T;
+    len:  usize;
+    cap:  usize;
+}
+
+# create an empty vector using the provided allocator
+#
+# an empty vector owns nothing, so the value is relocatable until the first
+# growth and never fails to construct.
+# ---
+# a:   allocator to use for allocations
+# ret: a new empty Vector[T]
+pub fun init[T](a: *A.Allocator) Vector[T] {
+    var v: Vector[T];
+    v.a    = a;
+    v.data = nil;
+    v.len  = 0;
+    v.cap  = 0;
+    ret v;
+}
+
+# free the backing buffer and reset the vector fields
+#
+# the elements are not visited: an element that owns storage is the caller's
+# to release before this runs.
+# ---
+# vec: vector to deinitialize
+# ret: ok when the backing buffer was released (or there was none), or the
+#      allocator's refusal, in which case the vector is left as it was
+pub fun dnit[T](vec: *Vector[T]) err[A.Error] {
+    if (vec == nil) { ret err[A.Error].ok{}; }
+
+    # shortcut for empty vector
+    if (vec.cap == 0) {
+        vec.data = nil;
+        vec.len  = 0;
+        ret err[A.Error].ok{};
+    }
+
+    val freed: err[A.Error] = A.deallocate[T](vec.a, vec.data, vec.cap);
+    if (sel freed.err) { ret freed; }
+    vec.data = nil;
+    vec.len  = 0;
+    vec.cap  = 0;
+    ret err[A.Error].ok{};
+}
+
+# check if the vector is empty
+# ---
+# ret: true if the vector has no elements
+pub fun is_empty[T](vec: *Vector[T]) bool {
+    ret vec.len == 0;
+}
+
+# clear the vector contents but keep allocated capacity
+# ---
+# vec: vector to clear
+pub fun clear[T](vec: *Vector[T]) {
+    if (vec == nil) { ret; }
+    vec.len = 0;
+}
+
+# reserve space for additional elements, growing the backing array if necessary
+#
+# a refused growth leaves the vector exactly as it was: the old buffer, length
+# and capacity stay valid and nothing was moved.
+# ---
+# vec:        vector to reserve space in
+# additional: number of extra elements to reserve space for
+# ret:        the new capacity, or the allocator's refusal
+pub fun reserve[T](vec: *Vector[T], additional: usize) res[usize, A.Error] {
+    if (vec == nil) { ret res[usize, A.Error].err{A.Error.invalid{}}; }
+
+    # check for overflow when calculating required capacity
+    val required: usize = vec.len + additional;
+    if (required < vec.len) {
+        ret res[usize, A.Error].err{A.Error.overflow{}};
+    }
+
+    # check if we already have enough capacity
+    if (vec.cap >= required) {
+        ret res[usize, A.Error].ok{vec.cap};
+    }
+
+    # calculate new capacity, starting with 8 if empty
+    var new_cap: usize = vec.cap;
+    if (new_cap == 0) { new_cap = 8; }
+
+    # double until we have enough capacity, or until we overflow
+    for (new_cap < required) {
+        val prev: usize = new_cap;
+        new_cap = new_cap * 2;
+
+        if (new_cap < prev) {
+            new_cap = required;
+            brk;
+        }
+    }
+
+    # a first growth has nothing to move, so it is one direct allocation
+    var grown: res[*T, A.Error];
+    if (vec.cap == 0) {
+        grown = A.allocate[T](vec.a, new_cap);
+    }
+    or {
+        grown = A.reallocate[T](vec.a, vec.data, vec.cap, new_cap);
+    }
+    if (sel grown.err) { ret res[usize, A.Error].err{grown.err}; }
+
+    vec.data = grown.ok;
+    vec.cap  = new_cap;
+
+    ret res[usize, A.Error].ok{vec.cap};
+}
+
+# ensure the vector has at least the given capacity, growing if necessary
+# ---
+# vec: vector to ensure capacity for
+# cap: minimum capacity to ensure
+# ret: the new capacity, or the allocator's refusal
+pub fun ensure[T](vec: *Vector[T], cap: usize) res[usize, A.Error] {
+    if (vec == nil)     { ret res[usize, A.Error].err{A.Error.invalid{}}; }
+    if (cap <= vec.cap) { ret res[usize, A.Error].ok{vec.cap}; }
+
+    ret reserve[T](vec, cap - vec.len);
+}
+
+# append a value to the vector
+#
+# the value is copied into the vector's storage. a refused push leaves the
+# vector unchanged and the value still the caller's.
+# ---
+# value: value to append
+# ret:   the new length, or the allocator's refusal
+pub fun push[T](vec: *Vector[T], value: T) res[usize, A.Error] {
+    val room: res[usize, A.Error] = reserve[T](vec, 1);
+    if (sel room.err) { ret room; }
+
+    vec.data[vec.len] = value;
+    vec.len           = vec.len + 1;
+
+    ret res[usize, A.Error].ok{vec.len};
+}
+
+# remove and return the last element
+#
+# the element is copied out and the slot is released; an element that owns
+# storage is now the caller's to release.
+# ---
+# ret: the value, or none when the vector is empty
+pub fun pop[T](vec: *Vector[T]) opt[T] {
+    if (vec == nil)   { ret opt[T].none{}; }
+    if (vec.len == 0) { ret opt[T].none{}; }
+
+    vec.len = vec.len - 1;
+
+    ret opt[T].some{vec.data[vec.len]};
+}
+
+# get a pointer to the element at the given index
+#
+# the pointer is into the vector's storage and is invalidated by any growth.
+# ---
+# index: element index
+# ret:   pointer to the element, or none when the index is out of range
+pub fun get[T](vec: *Vector[T], index: usize) opt[*T] {
+    if (vec == nil)       { ret opt[*T].none{}; }
+    if (index >= vec.len) { ret opt[*T].none{}; }
+
+    ret opt[*T].some{?vec.data[index]};
+}
+
+# return the number of elements in the vector
+# ---
+# ret: number of elements
+pub fun length[T](vec: *Vector[T]) usize {
+    ret vec.len;
+}
+
+# return the number of elements the backing array holds without growing
+# ---
+# ret: allocated capacity in elements
+pub fun capacity[T](vec: *Vector[T]) usize {
+    ret vec.cap;
+}
+
+# shorten the vector to its first len elements, keeping the capacity
+#
+# truncate never grows the vector. the elements past len are not visited: one
+# that owns storage is the caller's to release, through get or items, before
+# this runs.
+# ---
+# len: the new length, at most the current length
+# ret: ok, or bounds when len is past the current length, which changes nothing
+pub fun truncate[T](vec: *Vector[T], len: usize) err[VectorError] {
+    if (len > vec.len) { ret err[VectorError].err{VectorError.bounds{}}; }
+    vec.len = len;
+    ret err[VectorError].ok{};
+}
+
+# replace the element at the given index
+#
+# the replaced element is copied out; one that owns storage is now the
+# caller's to release.
+# ---
+# index: element index
+# value: value to store
+# ret:   the replaced element, or none when the index is out of range, in which
+#        case nothing was stored and the value is still the caller's
+pub fun set[T](vec: *Vector[T], index: usize, value: T) opt[T] {
+    if (index >= vec.len) { ret opt[T].none{}; }
+
+    val old: T = vec.data[index];
+    vec.data[index] = value;
+    ret opt[T].some{old};
+}
+
+# insert a value at the given index, shifting later elements up by one
+#
+# an index equal to the length appends. a refused insert leaves the vector
+# unchanged and the value still the caller's.
+# ---
+# index: position the value takes, at most the current length
+# value: value to insert
+# ret:   the new length, bounds when the index is past the length, or alloc
+#        when the growth was refused
+pub fun insert[T](vec: *Vector[T], index: usize, value: T) res[usize, VectorError] {
+    if (index > vec.len) { ret res[usize, VectorError].err{VectorError.bounds{}}; }
+
+    val room: res[usize, A.Error] = reserve[T](vec, 1);
+    if (sel room.err) { ret res[usize, VectorError].err{VectorError.alloc{room.err}}; }
+
+    memory.move[T](?vec.data[index + 1], ?vec.data[index], vec.len - index);
+    vec.data[index] = value;
+    vec.len         = vec.len + 1;
+
+    ret res[usize, VectorError].ok{vec.len};
+}
+
+# remove and return the element at the given index, shifting later elements
+# down by one
+#
+# the element is copied out; one that owns storage is now the caller's to
+# release.
+# ---
+# index: element index
+# ret:   the removed element, or none when the index is out of range
+pub fun remove[T](vec: *Vector[T], index: usize) opt[T] {
+    if (index >= vec.len) { ret opt[T].none{}; }
+
+    val value: T = vec.data[index];
+    memory.move[T](?vec.data[index], ?vec.data[index + 1], vec.len - index - 1);
+    vec.len = vec.len - 1;
+
+    ret opt[T].some{value};
+}
+
+# remove and return the element at the given index, moving the last element
+# into its place
+#
+# constant time, but the order of the remaining elements is not kept. the
+# element is copied out; one that owns storage is now the caller's to release.
+# ---
+# index: element index
+# ret:   the removed element, or none when the index is out of range
+pub fun swap_remove[T](vec: *Vector[T], index: usize) opt[T] {
+    if (index >= vec.len) { ret opt[T].none{}; }
+
+    val value: T = vec.data[index];
+    vec.len         = vec.len - 1;
+    vec.data[index] = vec.data[vec.len];
+
+    ret opt[T].some{value};
+}
+
+# append a copy of every element of a slice
+#
+# the elements are copied, so an element that owns storage is then held by
+# both the slice and the vector. the slice may borrow from this vector itself:
+# it is re-read from the grown buffer. a refused extend leaves the vector
+# unchanged.
+# ---
+# items: elements to append
+# ret:   the new length, or the allocator's refusal
+pub fun extend[T](vec: *Vector[T], items: Slice[T]) res[usize, A.Error] {
+    if (items.size == 0) { ret res[usize, A.Error].ok{vec.len}; }
+
+    # a slice into this vector's own buffer moves with it on growth
+    var inner:  bool  = false;
+    var offset: usize = 0;
+    $if ($size_of(T) != 0) {
+        val base: usize = vec.data::usize;
+        val at:   usize = items.data::usize;
+        if (vec.cap != 0 && at >= base && at - base < vec.cap * $size_of(T)) {
+            inner  = true;
+            offset = (at - base) / $size_of(T);
+        }
+    }
+
+    val room: res[usize, A.Error] = reserve[T](vec, items.size);
+    if (sel room.err) { ret room; }
+
+    var src: *T = items.data;
+    if (inner) { src = ?vec.data[offset]; }
+    memory.move[T](?vec.data[vec.len], src, items.size);
+    vec.len = vec.len + items.size;
+
+    ret res[usize, A.Error].ok{vec.len};
+}
+
+# borrow the elements as a slice
+#
+# the slice points into the vector's storage and is invalidated by any growth,
+# shrink, insert or removal.
+# ---
+# ret: a slice over the vector's elements
+pub fun items[T](vec: *Vector[T]) Slice[T] {
+    ret slice.make[T](vec.data, vec.len);
+}
+
+# borrow the unused capacity past the last element as a slice
+#
+# its contents are unspecified. writing into it does not change the length:
+# commit takes the written slots in. the slice is invalidated by any growth,
+# shrink or insert.
+# ---
+# ret: a slice over the slots between the length and the capacity
+pub fun spare[T](vec: *Vector[T]) Slice[T] {
+    ret slice.make[T](?vec.data[vec.len], vec.cap - vec.len);
+}
+
+# take the first count slots of the spare capacity in as elements
+#
+# the caller has written those slots, through spare, before this runs.
+# ---
+# count: number of spare slots written, at most the spare capacity
+# ret:   the new length, or bounds when count is past the spare capacity,
+#        which changes nothing
+pub fun commit[T](vec: *Vector[T], count: usize) res[usize, VectorError] {
+    if (count > vec.cap - vec.len) { ret res[usize, VectorError].err{VectorError.bounds{}}; }
+    vec.len = vec.len + count;
+    ret res[usize, VectorError].ok{vec.len};
+}
+
+# release the capacity past the last element
+#
+# over an allocator that never reclaims what it is given back, the capacity is
+# kept, since releasing it there would only cost fresh bytes on the next
+# growth. a refused shrink leaves the vector exactly as it was.
+# ---
+# ret: the capacity now held, or the allocator's refusal
+pub fun shrink[T](vec: *Vector[T]) res[usize, A.Error] {
+    if (vec.cap == vec.len) { ret res[usize, A.Error].ok{vec.cap}; }
+    if (!A.reclaims(vec.a)) { ret res[usize, A.Error].ok{vec.cap}; }
+
+    if (vec.len == 0) {
+        val freed: err[A.Error] = A.deallocate[T](vec.a, vec.data, vec.cap);
+        if (sel freed.err) { ret res[usize, A.Error].err{freed.err}; }
+        vec.data = nil;
+        vec.cap  = 0;
+        ret res[usize, A.Error].ok{0};
+    }
+
+    val shrunk: res[*T, A.Error] = A.reallocate[T](vec.a, vec.data, vec.cap, vec.len);
+    if (sel shrunk.err) { ret res[usize, A.Error].err{shrunk.err}; }
+    vec.data = shrunk.ok;
+    vec.cap  = vec.len;
+    ret res[usize, A.Error].ok{vec.cap};
+}
+
+$if (capability.HOSTED) {
+    test vector__push_get_and_pop_round_trip {
+        var a: A.Allocator;
+        page.make(?a);
+        var vec: Vector[i64] = init[i64](?a);
+
+        var i: i64 = 0;
+        for (i < 20) {
+            val pushed: res[usize, A.Error] = push[i64](?vec, i * 3);
+            if (sel pushed.err)              { ret 1; }
+            if (pushed.ok != (i + 1)::usize) { ret 2; }
+            i = i + 1;
+        }
+
+        val fifth: opt[*i64] = get[i64](?vec, 5);
+        if (!sel fifth.some)   { ret 3; }
+        if (@fifth.some != 15) { ret 4; }
+        @fifth.some = 100;
+
+        val past: opt[*i64] = get[i64](?vec, 20);
+        if (!sel past.none) { ret 5; }
+        val huge: res[usize, A.Error] = reserve[i64](?vec, ~(0::usize));
+        if (!sel huge.err)          { ret 5; }
+        if (!sel huge.err.overflow) { ret 5; }
+
+        var n: usize = 20;
+        for (n > 0) {
+            val popped: opt[i64] = pop[i64](?vec);
+            if (!sel popped.some) { ret 6; }
+            n = n - 1;
+            if (n == 5 && popped.some != 100)          { ret 7; }
+            if (n != 5 && popped.some != (n * 3)::i64) { ret 8; }
+        }
+        val empty: opt[i64] = pop[i64](?vec);
+        if (!sel empty.none) { ret 9; }
+
+        dnit[i64](?vec);
+        ret 0;
+    }
+
+    # a refused growth is the `err` case of push and leaves the vector exactly as
+    # it was: same buffer, same length, and nothing leaked
+    test vector__a_refused_growth_leaves_the_vector_intact {
+        var t:  testing.Testing;
+        val mr: err[A.Error] = testing.make(?t);
+        if (sel mr.err) { ret 1; }
+        var vec: Vector[u32] = init[u32](?t.a);
+
+        var i: u32 = 0;
+        for (i < 8) {
+            val pushed: res[usize, A.Error] = push[u32](?vec, i);
+            if (sel pushed.err) {
+                testing.dnit(?t);
+                ret 2;
+            }
+            i = i + 1;
+        }
+        val before: *u32  = vec.data;
+        val live:   usize = testing.live_count(?t);
+
+        # the ninth push has to grow, and that growth is the next request
+        testing.fail_at_ordinal(?t, testing.attempt_count(?t) + 1);
+        val refused: res[usize, A.Error] = push[u32](?vec, 8);
+        if (!sel refused.err) {
+            testing.dnit(?t);
+            ret 3;
+        }
+        if (!sel refused.err.exhausted) {
+            testing.dnit(?t);
+            ret 4;
+        }
+        if (vec.data != before) {
+            testing.dnit(?t);
+            ret 5;
+        }
+        if (vec.len != 8 || vec.cap != 8) {
+            testing.dnit(?t);
+            ret 6;
+        }
+        if (testing.live_count(?t) != live) {
+            testing.dnit(?t);
+            ret 7;
+        }
+
+        testing.clear_failure(?t);
+        val pushed: res[usize, A.Error] = push[u32](?vec, 8);
+        if (sel pushed.err) {
+            testing.dnit(?t);
+            ret 8;
+        }
+        if (vec.len != 9) {
+            testing.dnit(?t);
+            ret 9;
+        }
+
+        val freed: err[A.Error] = dnit[u32](?vec);
+        if (sel freed.err) {
+            testing.dnit(?t);
+            ret 10;
+        }
+        if (testing.leaked(?t)) {
+            testing.dnit(?t);
+            ret 11;
+        }
+        testing.dnit(?t);
+        ret 0;
+    }
+
+    # a vector holding 0, 10, 20 .. up to n elements, or an empty one on refusal
+    fun t_tens(a: *A.Allocator, n: usize) Vector[i64] {
+        var vec: Vector[i64] = init[i64](a);
+        var i:   usize       = 0;
+        for (i < n) {
+            push[i64](?vec, (i * 10)::i64);
+            i = i + 1;
+        }
+        ret vec;
+    }
+
+    # whether vec holds exactly the n values in want
+    fun t_holds(vec: *Vector[i64], want: *i64, n: usize) bool {
+        if (length[i64](vec) != n) { ret false; }
+        val s: Slice[i64] = items[i64](vec);
+        var i: usize      = 0;
+        for (i < n) {
+            if (s.data[i] != want[i]) { ret false; }
+            i = i + 1;
+        }
+        ret true;
+    }
+
+    test vector__truncate_shortens_and_refuses_growth {
+        var a: A.Allocator;
+        page.make(?a);
+        var vec: Vector[i64] = t_tens(?a, 4);
+        fin { dnit[i64](?vec); }
+        val cap: usize = capacity[i64](?vec);
+
+        val longer: err[VectorError] = truncate[i64](?vec, 5);
+        if (!sel longer.err)        { ret 1; }
+        if (!sel longer.err.bounds) { ret 1; }
+        if (length[i64](?vec) != 4) { ret 2; }
+
+        val same: err[VectorError] = truncate[i64](?vec, 4);
+        if (sel same.err) { ret 3; }
+        var want: [4]i64 = [4]i64{0, 10, 20, 30};
+        if (!t_holds(?vec, ?want[0], 4)) { ret 4; }
+
+        val shorter: err[VectorError] = truncate[i64](?vec, 2);
+        if (sel shorter.err)             { ret 5; }
+        if (!t_holds(?vec, ?want[0], 2)) { ret 6; }
+        val past: opt[*i64] = get[i64](?vec, 2);
+        if (!sel past.none) { ret 7; }
+
+        val zero: err[VectorError] = truncate[i64](?vec, 0);
+        if (sel zero.err)               { ret 8; }
+        if (!is_empty[i64](?vec))       { ret 9; }
+        if (capacity[i64](?vec) != cap) { ret 10; }
+
+        val regrow: err[VectorError] = truncate[i64](?vec, 1);
+        if (!sel regrow.err) { ret 11; }
+        val empty: err[VectorError] = truncate[i64](?vec, 0);
+        if (sel empty.err) { ret 12; }
+        ret 0;
+    }
+
+    test vector__set_returns_the_replaced_element {
+        var a: A.Allocator;
+        page.make(?a);
+        var vec: Vector[i64] = t_tens(?a, 3);
+        fin { dnit[i64](?vec); }
+
+        val first: opt[i64] = set[i64](?vec, 0, 1);
+        if (!sel first.some) { ret 1; }
+        if (first.some != 0) { ret 1; }
+        val last: opt[i64] = set[i64](?vec, 2, 3);
+        if (!sel last.some)  { ret 2; }
+        if (last.some != 20) { ret 2; }
+        val past: opt[i64] = set[i64](?vec, 3, 9);
+        if (!sel past.none) { ret 3; }
+        var want: [3]i64 = [3]i64{1, 10, 3};
+        if (!t_holds(?vec, ?want[0], 3)) { ret 4; }
+
+        var empty: Vector[i64] = init[i64](?a);
+        val none:  opt[i64]    = set[i64](?empty, 0, 9);
+        if (!sel none.none) { ret 5; }
+        ret 0;
+    }
+
+    test vector__insert_shifts_up_and_refuses_past_the_end {
+        var a: A.Allocator;
+        page.make(?a);
+        var vec: Vector[i64] = init[i64](?a);
+        fin { dnit[i64](?vec); }
+
+        val gap: res[usize, VectorError] = insert[i64](?vec, 1, 5);
+        if (!sel gap.err)        { ret 1; }
+        if (!sel gap.err.bounds) { ret 1; }
+        val into: res[usize, VectorError] = insert[i64](?vec, 0, 20);
+        if (sel into.err) { ret 2; }
+        if (into.ok != 1) { ret 2; }
+        val front: res[usize, VectorError] = insert[i64](?vec, 0, 0);
+        if (sel front.err) { ret 3; }
+        val back: res[usize, VectorError] = insert[i64](?vec, 2, 30);
+        if (sel back.err) { ret 4; }
+        val mid: res[usize, VectorError] = insert[i64](?vec, 1, 10);
+        if (sel mid.err) { ret 5; }
+        if (mid.ok != 4) { ret 5; }
+        val past: res[usize, VectorError] = insert[i64](?vec, 5, 50);
+        if (!sel past.err) { ret 6; }
+
+        var want: [4]i64 = [4]i64{0, 10, 20, 30};
+        if (!t_holds(?vec, ?want[0], 4)) { ret 7; }
+        ret 0;
+    }
+
+    test vector__remove_shifts_down_and_refuses_past_the_end {
+        var a: A.Allocator;
+        page.make(?a);
+        var vec: Vector[i64] = t_tens(?a, 4);
+        fin { dnit[i64](?vec); }
+
+        val past: opt[i64] = remove[i64](?vec, 4);
+        if (!sel past.none) { ret 1; }
+        val first: opt[i64] = remove[i64](?vec, 0);
+        if (!sel first.some) { ret 2; }
+        if (first.some != 0) { ret 2; }
+        val last: opt[i64] = remove[i64](?vec, 2);
+        if (!sel last.some)  { ret 3; }
+        if (last.some != 30) { ret 3; }
+        var want: [2]i64 = [2]i64{10, 20};
+        if (!t_holds(?vec, ?want[0], 2)) { ret 4; }
+
+        remove[i64](?vec, 0);
+        remove[i64](?vec, 0);
+        val empty: opt[i64] = remove[i64](?vec, 0);
+        if (!sel empty.none) { ret 5; }
+        ret 0;
+    }
+
+    test vector__swap_remove_fills_from_the_back {
+        var a: A.Allocator;
+        page.make(?a);
+        var vec: Vector[i64] = t_tens(?a, 4);
+        fin { dnit[i64](?vec); }
+
+        val past: opt[i64] = swap_remove[i64](?vec, 4);
+        if (!sel past.none) { ret 1; }
+        val first: opt[i64] = swap_remove[i64](?vec, 0);
+        if (!sel first.some) { ret 2; }
+        if (first.some != 0) { ret 2; }
+        var want: [3]i64 = [3]i64{30, 10, 20};
+        if (!t_holds(?vec, ?want[0], 3)) { ret 3; }
+        val last: opt[i64] = swap_remove[i64](?vec, 2);
+        if (!sel last.some)              { ret 4; }
+        if (last.some != 20)             { ret 4; }
+        if (!t_holds(?vec, ?want[0], 2)) { ret 5; }
+
+        var empty: Vector[i64] = init[i64](?a);
+        val none:  opt[i64]    = swap_remove[i64](?empty, 0);
+        if (!sel none.none) { ret 6; }
+        ret 0;
+    }
+
+    # extending from the vector's own elements must survive the growth moving them
+    test vector__extend_copies_including_from_itself {
+        var a: A.Allocator;
+        page.make(?a);
+        var vec: Vector[i64] = init[i64](?a);
+        fin { dnit[i64](?vec); }
+
+        var src:  [3]i64              = [3]i64{0, 10, 20};
+        val none: res[usize, A.Error] = extend[i64](?vec, slice.make[i64](?src[0], 0));
+        if (sel none.err) { ret 1; }
+        if (none.ok != 0) { ret 1; }
+        val some: res[usize, A.Error] = extend[i64](?vec, slice.make[i64](?src[0], 3));
+        if (sel some.err) { ret 2; }
+        if (some.ok != 3) { ret 2; }
+
+        # fill to capacity so the self-extend has to grow
+        for (length[i64](?vec) < capacity[i64](?vec)) {
+            push[i64](?vec, 0);
+        }
+        val n:       usize               = length[i64](?vec);
+        val doubled: res[usize, A.Error] = extend[i64](?vec, items[i64](?vec));
+        if (sel doubled.err)     { ret 3; }
+        if (doubled.ok != n * 2) { ret 3; }
+        val s: Slice[i64] = items[i64](?vec);
+        if (s.data[n] != 0 || s.data[n + 1] != 10 || s.data[n + 2] != 20) { ret 4; }
+        ret 0;
+    }
+
+    test vector__spare_and_commit_take_written_slots_in {
+        var a: A.Allocator;
+        page.make(?a);
+        var vec: Vector[i64] = init[i64](?a);
+        fin { dnit[i64](?vec); }
+
+        val nothing: Slice[i64] = spare[i64](?vec);
+        if (nothing.size != 0) { ret 1; }
+        val over: res[usize, VectorError] = commit[i64](?vec, 1);
+        if (!sel over.err)        { ret 2; }
+        if (!sel over.err.bounds) { ret 2; }
+
+        reserve[i64](?vec, 4);
+        val room: Slice[i64] = spare[i64](?vec);
+        if (room.size != capacity[i64](?vec)) { ret 3; }
+        room.data[0] = 0;
+        room.data[1] = 10;
+        val two: res[usize, VectorError] = commit[i64](?vec, 2);
+        if (sel two.err) { ret 4; }
+        if (two.ok != 2) { ret 4; }
+        var want: [2]i64 = [2]i64{0, 10};
+        if (!t_holds(?vec, ?want[0], 2)) { ret 5; }
+
+        val rest: Slice[i64]              = spare[i64](?vec);
+        val left: usize                   = rest.size;
+        val past: res[usize, VectorError] = commit[i64](?vec, left + 1);
+        if (!sel past.err) { ret 6; }
+        val all: res[usize, VectorError] = commit[i64](?vec, left);
+        if (sel all.err)                   { ret 7; }
+        if (all.ok != capacity[i64](?vec)) { ret 7; }
+        ret 0;
+    }
+
+    test vector__shrink_releases_spare_capacity {
+        var t:  testing.Testing;
+        val mr: err[A.Error] = testing.make(?t);
+        if (sel mr.err) { ret 1; }
+        fin { testing.dnit(?t); }
+        var vec: Vector[i64] = t_tens(testing.allocator_of(?t), 3);
+
+        val fit: res[usize, A.Error] = shrink[i64](?vec);
+        if (sel fit.err)              { ret 2; }
+        if (fit.ok != 3)              { ret 2; }
+        if (capacity[i64](?vec) != 3) { ret 3; }
+        var want: [3]i64 = [3]i64{0, 10, 20};
+        if (!t_holds(?vec, ?want[0], 3)) { ret 4; }
+        val again: res[usize, A.Error] = shrink[i64](?vec);
+        if (sel again.err) { ret 5; }
+        if (again.ok != 3) { ret 5; }
+
+        clear[i64](?vec);
+        val gone: res[usize, A.Error] = shrink[i64](?vec);
+        if (sel gone.err)       { ret 6; }
+        if (gone.ok != 0)       { ret 6; }
+        if (testing.leaked(?t)) { ret 7; }
+        val freed: err[A.Error] = dnit[i64](?vec);
+        if (sel freed.err) { ret 8; }
+
+        # a retaining backing keeps the capacity it was given
+        var a: A.Allocator = @testing.allocator_of(?t);
+        a.retains = true;
+        var kept: Vector[i64]         = t_tens(?a, 3);
+        val cap:  usize               = capacity[i64](?kept);
+        val held: res[usize, A.Error] = shrink[i64](?kept);
+        if (sel held.err)   { ret 9; }
+        if (held.ok != cap) { ret 9; }
+        dnit[i64](?kept);
+        if (testing.leaked(?t)) { ret 10; }
+        ret 0;
+    }
+
+    fun refuse_reallocate(ctx: ptr, p: ptr, old_size: usize, new_size: usize, align: usize) opt[ptr] {
+        ret opt[ptr].none{};
+    }
+
+    test vector__first_reserve_allocates_once {
+        var t:  testing.Testing;
+        val mr: err[A.Error] = testing.make(?t);
+        if (sel mr.err) { ret 1; }
+        fin { testing.dnit(?t); }
+
+        # a reallocate that refuses everything must never be reached by a first reserve
+        val base: *A.Allocator = testing.allocator_of(?t);
+        var a:    A.Allocator  = @base;
+        a.fn_reallocate = refuse_reallocate;
+        var vec: Vector[u32] = init[u32](?a);
+
+        val reserved: res[usize, A.Error] = reserve[u32](?vec, 4);
+        if (sel reserved.err)               { ret 2; }
+        if (vec.cap < 4 || vec.len != 0)    { ret 3; }
+        if (testing.attempt_count(?t) != 1) { ret 4; }
+
+        val freed: err[A.Error] = dnit[u32](?vec);
+        if (sel freed.err)      { ret 5; }
+        if (testing.leaked(?t)) { ret 6; }
+        ret 0;
+    }
+}
