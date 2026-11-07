@@ -21,10 +21,11 @@ use posix_threads.backend;
 
 A static executable never consults the backend, and darwin and windows have
 their own system threads, so the module is empty there. `Config.stack_commit` is
-refused as `unsupported`. Exactly one backend belongs in a program. Keep secrets
+refused as `unsupported`. Exactly one backend belongs in a link. Keep secrets
 away from this seam: it is a `#[weak]` call, and constant-time code is not yet
-refused for passing one through it. On ELF the backend has to be linked into each
-image that spawns.
+refused for passing one through it. Replacement is link time only, so a shared
+library that carries std and spawns has this package in its own link. No other
+image can supply it, and `LD_PRELOAD` does not.
 
 `demo/hosted` runs the backend end to end: `demo/hosted/run.sh path/to/mach`.
 
