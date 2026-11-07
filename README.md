@@ -1,11 +1,38 @@
 # mach-posix-threads
 
+std's thread backend over `pthread_create`, for loader-hosted linux processes.
+
+A shared library, a dynamic executable or anything that links a C library on
+linux is loader-hosted. Thread-locals and C runtime state exist there only on
+threads the host creates, so `std.sync.thread.spawn` returns `unsupported` until
+a backend is installed. std names no libc symbol, so the backend is this package.
+This is the only code in the family that names `pthread_create`.
+
+## Use
+
+Depend on the package and import its module once, anywhere the build reaches.
+That puts the backend in the link, and `[link.c]` cascades to the program. The
+program's linux targets state `env = "gnu"`, which names the loader, and the
+build needs a C compiler to locate `libc.so.6`, `CC` for a cross target.
+
+```mach
+use posix_threads.backend;
+```
+
+A static executable never consults the backend, and darwin and windows have
+their own system threads, so the module is empty there. `Config.stack_commit` is
+refused as `unsupported`. Exactly one backend belongs in a program. Keep secrets
+away from this seam: it is a `#[weak]` call, and constant-time code is not yet
+refused for passing one through it. On ELF the backend has to be linked into each
+image that spawns.
+
+`demo/hosted` runs the backend end to end: `demo/hosted/run.sh path/to/mach`.
+
 ## Build
 
 ```sh
 mach dep pull .
 mach build .
-mach run .
 mach test . --timeout 5m
 ```
 
@@ -51,8 +78,9 @@ demo suites are not CI jobs. Run them locally.
 `gate` is the check the branch rules require. It fails if any job it needs
 failed or was cancelled.
 
-The compiler version is `MACH_VERSION`, an exact release, in `ci.yml` and
-`cd.yml`. Change it together with the `mach` range in `mach.toml`.
+The compiler is `MACH_REF`, a mach commit, in `ci.yml` until a 7.x release
+exists. `cd.yml` still names `MACH_VERSION`, an exact release, and moves to one
+then. Change either together with the `mach` range in `mach.toml`.
 
 ## Releases
 
