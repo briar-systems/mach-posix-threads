@@ -66,21 +66,14 @@ env = "macos"
 abi = "aapcs64"
 
 # exported so a program that imports the backend binds the C runtime through it.
-# a library named by `system` is searched for as its archive first, and glibc's
-# libc.a is not what a loader-hosted program binds, so the shared object is named
-# by file. CC is the C compiler of the build's target
+# a bare system name is shared unless it states otherwise, so no archive stands in
 [link.c]
-source = "local"
-path = "{project.work}/libc.so.6"
+source = "system"
+name = "c"
 sys = ["linux"]
 arch = ["*"]
 abi = ["*"]
 export = true
-
-[step.libc]
-argv = ["sh", "-c", "cp -L \"$(${CC:-cc} -print-file-name=libc.so.6)\" '{project.work}/libc.so.6'"]
-in = []
-out = ["{project.work}/libc.so.6"]
 
 [artifact.posix_threads]
 kind = "static"

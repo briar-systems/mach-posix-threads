@@ -66,7 +66,8 @@ jobs:
       - run: mach dep pull .
       - if: strategy.job-index == 0
         run: mach fmt --check .
-      # the host target only: the other targets link a libc.so.6 this runner does not hold
+      - run: mach build . --all -p "$PROFILE"
+      # the host target only: a test of another target is not run
       - run: mach test . -p "$PROFILE"
 
   gate:
