@@ -1,7 +1,7 @@
 [project]
 id = "posix_threads"
 version = "0.1.0"
-mach = "^6"
+mach = "^7"
 src = "src"
 work = "out/{target.name}/{profile.name}"
 
@@ -63,7 +63,7 @@ abi = "sysv64"
 arch = "aarch64"
 sys = "darwin"
 env = "macos"
-abi = "aapcs64"
+abi = "darwinpcs"
 
 # exported so a program that imports the backend binds the C runtime through it.
 # a bare system name is shared unless it states otherwise, so no archive stands in
@@ -87,4 +87,4 @@ need = []
 
 [dep.std]
 git = "https://github.com/briar-systems/mach-std"
-version = "^9.0"
+version = "^10.1.1"
